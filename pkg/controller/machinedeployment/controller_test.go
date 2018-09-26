@@ -380,7 +380,6 @@ func TestSyncDeploymentCreatesMachineSet(t *testing.T) {
 
 	f.expectCreateMSAction(ms)
 	f.expectUpdateDeploymentStatusAction(d)
-	f.expectUpdateDeploymentStatusAction(d)
 
 	f.run(d)
 }

@@ -24,6 +24,7 @@ import (
 	core "k8s.io/client-go/testing"
 	"sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 	"sigs.k8s.io/cluster-api/pkg/client/clientset_generated/clientset/fake"
+	"sigs.k8s.io/cluster-api/pkg/controller/machinedeployment/util"
 )
 
 func TestMachineDeploymentController_reconcileNewMachineSet(t *testing.T) {
@@ -89,10 +90,12 @@ func TestMachineDeploymentController_reconcileNewMachineSet(t *testing.T) {
 			controller := &MachineDeploymentControllerImpl{}
 			controller.machineClient = fakeClient
 
-			scaled, err := controller.reconcileNewMachineSet(allMSs, newMS, deployment)
+			oldReplicas := *newMS.Spec.Replicas
+			newMS, err := controller.reconcileNewMachineSet(allMSs, newMS, deployment)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			scaled := oldReplicas != *newMS.Spec.Replicas
 
 			if !test.scaleExpected {
 				if scaled || len(fakeClient.Actions()) > 0 {
@@ -219,10 +222,13 @@ func TestMachineDeploymentController_reconcileOldMachineSets(t *testing.T) {
 			controller := &MachineDeploymentControllerImpl{}
 			controller.machineClient = fakeClient
 
-			scaled, err := controller.reconcileOldMachineSets(allMSs, oldMSs, newMS, deployment)
+			oldReplicas := util.GetReplicaCountForMachineSets(oldMSs)
+			updatedOldMSs, err := controller.reconcileOldMachineSets(allMSs, oldMSs, newMS, deployment)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
+			scaled := oldReplicas != util.GetReplicaCountForMachineSets(updatedOldMSs)
+
 			if !test.scaleExpected {
 				if scaled || len(fakeClient.Actions()) > 0 {
 					t.Fatalf("unexpected scaling: %v", fakeClient.Actions())
@@ -394,7 +400,7 @@ func TestMachineDeploymentController_scaleDownOldMachineSetsForRollingUpdate(t *
 			controller := &MachineDeploymentControllerImpl{}
 			controller.machineClient = fakeClient
 
-			scaled, err := controller.scaleDownOldMachineSetsForRollingUpdate(allMSs, oldMSs, deployment)
+			scaled, _, err := controller.scaleDownOldMachineSetsForRollingUpdate(allMSs, oldMSs, deployment)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}

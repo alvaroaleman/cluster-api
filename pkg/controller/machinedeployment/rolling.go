@@ -38,23 +38,15 @@ func (dc *MachineDeploymentControllerImpl) rolloutRolling(d *v1alpha1.MachineDep
 	allMSs := append(oldMSs, newMS)
 
 	// Scale up, if we can.
-	scaledUp, err := dc.reconcileNewMachineSet(allMSs, newMS, d)
+	newMS, err = dc.reconcileNewMachineSet(allMSs, newMS, d)
 	if err != nil {
 		return err
-	}
-	if scaledUp {
-		// TODO: update deployment status for deployment progress
-		return nil
 	}
 
 	// Scale down, if we can.
-	scaledDown, err := dc.reconcileOldMachineSets(allMSs, dutil.FilterActiveMachineSets(oldMSs), newMS, d)
+	oldMSs, err = dc.reconcileOldMachineSets(allMSs, oldMSs, newMS, d)
 	if err != nil {
 		return err
-	}
-	if scaledDown {
-		// TODO: update deployment status for deployment progress
-		return nil
 	}
 
 	if dutil.DeploymentComplete(d, &d.Status) {
@@ -63,47 +55,48 @@ func (dc *MachineDeploymentControllerImpl) rolloutRolling(d *v1alpha1.MachineDep
 		}
 	}
 
-	// TODO: update deployment status for deployment progress
-	return nil
+	_, err = dc.ensureStatus(d, newMS, oldMSs)
+	return err
 }
 
-func (dc *MachineDeploymentControllerImpl) reconcileNewMachineSet(allMSs []*v1alpha1.MachineSet, newMS *v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) (bool, error) {
+func (dc *MachineDeploymentControllerImpl) reconcileNewMachineSet(allMSs []*v1alpha1.MachineSet, newMS *v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) (*v1alpha1.MachineSet, error) {
 	if deployment.Spec.Replicas == nil {
-		return false, fmt.Errorf("spec replicas for deployment set %v is nil, this is unexpected", deployment.Name)
+		return newMS, fmt.Errorf("spec replicas for deployment set %v is nil, this is unexpected", deployment.Name)
 	}
 	if newMS.Spec.Replicas == nil {
-		return false, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", newMS.Name)
+		return newMS, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", newMS.Name)
 	}
 
+	var err error
 	if *(newMS.Spec.Replicas) == *(deployment.Spec.Replicas) {
 		// Scaling not required.
-		return false, nil
+		return newMS, nil
 	}
 	if *(newMS.Spec.Replicas) > *(deployment.Spec.Replicas) {
 		// Scale down.
-		scaled, _, err := dc.scaleMachineSet(newMS, *(deployment.Spec.Replicas), deployment)
-		return scaled, err
+		_, newMS, err = dc.scaleMachineSet(newMS, *(deployment.Spec.Replicas), deployment)
+		return newMS, err
 	}
 	newReplicasCount, err := dutil.NewMSNewReplicas(deployment, allMSs, newMS)
 	if err != nil {
-		return false, err
+		return newMS, err
 	}
-	scaled, _, err := dc.scaleMachineSet(newMS, newReplicasCount, deployment)
-	return scaled, err
+	_, newMS, err = dc.scaleMachineSet(newMS, newReplicasCount, deployment)
+	return newMS, err
 }
 
-func (dc *MachineDeploymentControllerImpl) reconcileOldMachineSets(allMSs []*v1alpha1.MachineSet, oldMSs []*v1alpha1.MachineSet, newMS *v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) (bool, error) {
+func (dc *MachineDeploymentControllerImpl) reconcileOldMachineSets(allMSs []*v1alpha1.MachineSet, oldMSs []*v1alpha1.MachineSet, newMS *v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) ([]*v1alpha1.MachineSet, error) {
 	if deployment.Spec.Replicas == nil {
-		return false, fmt.Errorf("spec replicas for deployment set %v is nil, this is unexpected", deployment.Name)
+		return oldMSs, fmt.Errorf("spec replicas for deployment set %v is nil, this is unexpected", deployment.Name)
 	}
 	if newMS.Spec.Replicas == nil {
-		return false, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", newMS.Name)
+		return oldMSs, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", newMS.Name)
 	}
 
 	oldMachinesCount := dutil.GetReplicaCountForMachineSets(oldMSs)
 	if oldMachinesCount == 0 {
 		// Can't scale down further
-		return false, nil
+		return oldMSs, nil
 	}
 
 	allMachinesCount := dutil.GetReplicaCountForMachineSets(allMSs)
@@ -144,27 +137,26 @@ func (dc *MachineDeploymentControllerImpl) reconcileOldMachineSets(allMSs []*v1a
 	newMSUnavailableMachineCount := *(newMS.Spec.Replicas) - newMS.Status.AvailableReplicas
 	maxScaledDown := allMachinesCount - minAvailable - newMSUnavailableMachineCount
 	if maxScaledDown <= 0 {
-		return false, nil
+		return oldMSs, nil
 	}
 
 	// Clean up unhealthy replicas first, otherwise unhealthy replicas will block deployment
 	// and cause timeout. See https://github.com/kubernetes/kubernetes/issues/16737
 	oldMSs, cleanupCount, err := dc.cleanupUnhealthyReplicas(oldMSs, deployment, maxScaledDown)
 	if err != nil {
-		return false, nil
+		return oldMSs, nil
 	}
 	glog.V(4).Infof("Cleaned up unhealthy replicas from old MSes by %d", cleanupCount)
 
 	// Scale down old machine sets, need check maxUnavailable to ensure we can scale down
 	allMSs = append(oldMSs, newMS)
-	scaledDownCount, err := dc.scaleDownOldMachineSetsForRollingUpdate(allMSs, oldMSs, deployment)
+	scaledDownCount, oldMSs, err := dc.scaleDownOldMachineSetsForRollingUpdate(allMSs, oldMSs, deployment)
 	if err != nil {
-		return false, nil
+		return oldMSs, err
 	}
 	glog.V(4).Infof("Scaled down old MSes of deployment %s by %d", deployment.Name, scaledDownCount)
 
-	totalScaledDown := cleanupCount + scaledDownCount
-	return totalScaledDown > 0, nil
+	return oldMSs, nil
 }
 
 // cleanupUnhealthyReplicas will scale down old machine sets with unhealthy replicas, so that all unhealthy replicas will be deleted.
@@ -214,9 +206,9 @@ func (dc *MachineDeploymentControllerImpl) cleanupUnhealthyReplicas(oldMSs []*v1
 
 // scaleDownOldMachineSetsForRollingUpdate scales down old machine sets when deployment strategy is "RollingUpdate".
 // Need check maxUnavailable to ensure availability
-func (dc *MachineDeploymentControllerImpl) scaleDownOldMachineSetsForRollingUpdate(allMSs []*v1alpha1.MachineSet, oldMSs []*v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) (int32, error) {
+func (dc *MachineDeploymentControllerImpl) scaleDownOldMachineSetsForRollingUpdate(allMSs []*v1alpha1.MachineSet, oldMSs []*v1alpha1.MachineSet, deployment *v1alpha1.MachineDeployment) (int32, []*v1alpha1.MachineSet, error) {
 	if deployment.Spec.Replicas == nil {
-		return 0, fmt.Errorf("spec replicas for deployment %v is nil, this is unexpected", deployment.Name)
+		return 0, oldMSs, fmt.Errorf("spec replicas for deployment %v is nil, this is unexpected", deployment.Name)
 	}
 
 	maxUnavailable := dutil.MaxUnavailable(*deployment)
@@ -227,7 +219,7 @@ func (dc *MachineDeploymentControllerImpl) scaleDownOldMachineSetsForRollingUpda
 	availableMachineCount := dutil.GetAvailableReplicaCountForMachineSets(allMSs)
 	if availableMachineCount <= minAvailable {
 		// Cannot scale down.
-		return 0, nil
+		return 0, oldMSs, nil
 	}
 	glog.V(4).Infof("Found %d available machines in deployment %s, scaling down old MSes", availableMachineCount, deployment.Name)
 
@@ -235,32 +227,33 @@ func (dc *MachineDeploymentControllerImpl) scaleDownOldMachineSetsForRollingUpda
 
 	totalScaledDown := int32(0)
 	totalScaleDownCount := availableMachineCount - minAvailable
-	for _, targetMS := range oldMSs {
-		if targetMS.Spec.Replicas == nil {
-			return 0, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", targetMS.Name)
+	var err error
+	for idx, _ := range oldMSs {
+		if oldMSs[idx].Spec.Replicas == nil {
+			return 0, oldMSs, fmt.Errorf("spec replicas for machine set %v is nil, this is unexpected", oldMSs[idx].Name)
 		}
 
 		if totalScaledDown >= totalScaleDownCount {
 			// No further scaling required.
 			break
 		}
-		if *(targetMS.Spec.Replicas) == 0 {
+		if *(oldMSs[idx].Spec.Replicas) == 0 {
 			// cannot scale down this MachineSet.
 			continue
 		}
 		// Scale down.
-		scaleDownCount := int32(integer.Int32Min(*(targetMS.Spec.Replicas), totalScaleDownCount-totalScaledDown))
-		newReplicasCount := *(targetMS.Spec.Replicas) - scaleDownCount
-		if newReplicasCount > *(targetMS.Spec.Replicas) {
-			return 0, fmt.Errorf("when scaling down old MS, got invalid request to scale down %s/%s %d -> %d", targetMS.Namespace, targetMS.Name, *(targetMS.Spec.Replicas), newReplicasCount)
+		scaleDownCount := int32(integer.Int32Min(*(oldMSs[idx].Spec.Replicas), totalScaleDownCount-totalScaledDown))
+		newReplicasCount := *(oldMSs[idx].Spec.Replicas) - scaleDownCount
+		if newReplicasCount > *(oldMSs[idx].Spec.Replicas) {
+			return totalScaledDown, oldMSs, fmt.Errorf("when scaling down old MS, got invalid request to scale down %s/%s %d -> %d", oldMSs[idx].Namespace, oldMSs[idx].Name, *(oldMSs[idx].Spec.Replicas), newReplicasCount)
 		}
-		_, _, err := dc.scaleMachineSet(targetMS, newReplicasCount, deployment)
+		_, oldMSs[idx], err = dc.scaleMachineSet(oldMSs[idx], newReplicasCount, deployment)
 		if err != nil {
-			return totalScaledDown, err
+			return totalScaledDown, oldMSs, err
 		}
 
 		totalScaledDown += scaleDownCount
 	}
 
-	return totalScaledDown, nil
+	return totalScaledDown, oldMSs, nil
 }

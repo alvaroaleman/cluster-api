@@ -24,10 +24,12 @@ import (
 
 	"github.com/golang/glog"
 
+	"k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	apirand "k8s.io/apimachinery/pkg/util/rand"
+	"k8s.io/client-go/util/retry"
 
 	"sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
 	dutil "sigs.k8s.io/cluster-api/pkg/controller/machinedeployment/util"
@@ -107,15 +109,10 @@ func (dc *MachineDeploymentControllerImpl) getNewMachineSet(d *v1alpha1.MachineD
 
 		// Apply revision annotation from existingNewMS if it is missing from the deployment.
 		// needsUpdate is false if there is not annotation or is already present.
-		needsUpdate := dutil.SetDeploymentRevision(d, msCopy.Annotations[dutil.RevisionAnnotation])
-
-		if needsUpdate {
-			var err error
-			if d, err = dc.machineClient.ClusterV1alpha1().MachineDeployments(d.Namespace).Update(d); err != nil {
-				return nil, err
-			}
-		}
-		return msCopy, nil
+		_, err := dc.updateMachineDeployment(d, func(innerDeployment *v1alpha1.MachineDeployment) {
+			_ = dutil.SetDeploymentRevision(d, msCopy.Annotations[dutil.RevisionAnnotation])
+		})
+		return msCopy, err
 	}
 
 	if !createIfNotExisted {
@@ -187,13 +184,12 @@ func (dc *MachineDeploymentControllerImpl) getNewMachineSet(d *v1alpha1.MachineD
 		return nil, err
 	}
 
-	needsUpdate := dutil.SetDeploymentRevision(d, newRevision)
 	if !alreadyExists {
 		glog.V(4).Infof("Created new machine set %q", createdMS.Name)
 	}
-	if needsUpdate {
-		_, err = dc.machineClient.ClusterV1alpha1().MachineDeployments(d.Namespace).UpdateStatus(d)
-	}
+	_, err = dc.updateMachineDeployment(d, func(innerDeployment *v1alpha1.MachineDeployment) {
+		_ = dutil.SetDeploymentRevision(d, newRevision)
+	})
 	return createdMS, err
 }
 
@@ -455,4 +451,29 @@ func (dc *MachineDeploymentControllerImpl) isScalingEvent(d *v1alpha1.MachineDep
 		}
 	}
 	return false, nil
+}
+
+func (dc *MachineDeploymentControllerImpl) updateMachineDeployment(d *v1alpha1.MachineDeployment, modify func(*v1alpha1.MachineDeployment)) (*v1alpha1.MachineDeployment, error) {
+	// Verify the modify func actually changes something
+	dCopy := d.DeepCopy()
+	if equality.Semantic.DeepEqual(dCopy, d) {
+		return d, nil
+	}
+
+	var retryErr error
+	err := retry.RetryOnConflict(retry.DefaultBackoff, func() error {
+		//Get latest version from API
+		d, err := dc.machineClient.ClusterV1alpha1().MachineDeployments(d.Namespace).Get(d.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+
+		// Apply modifications
+		modify(d)
+
+		// Update the machineDeployment
+		d, retryErr = dc.machineClient.ClusterV1alpha1().MachineDeployments(d.Namespace).Update(d)
+		return retryErr
+	})
+	return d, err
 }

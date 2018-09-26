@@ -968,7 +968,7 @@
 
 [[projects]]
   branch = "release-6.0"
-  digest = "1:0a74a93862bed1d030a59f16b6fdef94ea8ac23dce85ad291c3e2fa22675fcbc"
+  digest = "1:36bc923756ec7e69f96101f3a456ae7e8ba528eb756f56e053ce333fd1712265"
   name = "k8s.io/client-go"
   packages = [
     "discovery",
@@ -1125,6 +1125,7 @@
     "util/homedir",
     "util/integer",
     "util/jsonpath",
+    "util/retry",
     "util/workqueue",
   ]
   pruneopts = "UT"
@@ -1238,6 +1239,7 @@
     "k8s.io/client-go/util/cert/triple",
     "k8s.io/client-go/util/flowcontrol",
     "k8s.io/client-go/util/integer",
+    "k8s.io/client-go/util/retry",
     "k8s.io/client-go/util/workqueue",
     "k8s.io/code-generator/cmd/client-gen",
     "k8s.io/code-generator/cmd/conversion-gen",

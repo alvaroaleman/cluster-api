@@ -18,6 +18,7 @@ package mutating
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	clusterv1alpha1 "sigs.k8s.io/cluster-api/pkg/apis/cluster/v1alpha1"
@@ -43,7 +44,14 @@ type MachineDeploymentCreateUpdateHandler struct {
 }
 
 func (h *MachineDeploymentCreateUpdateHandler) mutatingMachineDeploymentFn(ctx context.Context, obj *clusterv1alpha1.MachineDeployment) error {
-	// TODO(user): implement your admission logic
+
+	DefaultingFunction(obj)
+
+	validationErrors := Validate(obj)
+	if len(validationErrors) > 0 {
+		return fmt.Errorf("validation failed: %v", validationErrors)
+	}
+
 	return nil
 }
 
